@@ -13,17 +13,15 @@ from typing import List, Dict, Any, Optional
 import dashscope
 import os
 import logging
-import traceback
-from pathlib import Path
 
-# ==================== 初始化设置 ====================
+# 设置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 路径配置（兼容本地和Streamlit Cloud）
-BASE_DIR = Path("/mount/src/dpjcs") if "MOUNT_SRC" in os.environ else Path(__file__).parent.absolute()
-VECTORSTORE_DIR = BASE_DIR / "vectorstores"
-PDF_DIR = BASE_DIR / "data"
+# ==================== 路径配置 ====================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取当前文件绝对路径
+VECTORSTORE_DIR = os.path.join(BASE_DIR, "vectorstores")  # 向量库存储路径
+PDF_DIR = os.path.join(BASE_DIR, "data")  # PDF文档存储路径
 
 # 确保目录存在
 os.makedirs(VECTORSTORE_DIR, exist_ok=True)
@@ -31,7 +29,8 @@ os.makedirs(PDF_DIR, exist_ok=True)
 
 # ==================== 1. Embedding 模型封装 ====================
 class QwenEmbeddings(Embeddings):
-    """增强版的通义千问文本向量化"""
+    """通义千问文本向量化"""
+
     def __init__(self, api_key: str, model: str = "text-embedding-v2"):
         if not api_key or not api_key.startswith("sk-"):
             raise ValueError("无效的API密钥格式")
@@ -41,24 +40,23 @@ class QwenEmbeddings(Embeddings):
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
-        
-        embeddings = []
-        for text in texts:
-            try:
+        try:
+            embeddings = []
+            for text in texts:
                 resp = dashscope.TextEmbedding.call(
                     model=self.model,
                     input=text,
                     timeout=15
                 )
-                if resp.status_code == 200:
+                if resp and resp.status_code == 200:
                     embeddings.append(resp.output["embeddings"][0]["embedding"])
                 else:
-                    logger.error(f"Embedding失败: {resp.code} - {resp.message}")
-                    raise ValueError(f"API错误: {resp.message}")
-            except Exception as e:
-                logger.error(f"文本向量化失败: {str(e)}\n文本内容: {text[:50]}...")
-                raise
-        return embeddings
+                    msg = getattr(resp, 'message', '未知错误')
+                    raise ValueError(f"Embedding失败: {msg}")
+            return embeddings
+        except Exception as e:
+            logger.error(f"Embedding错误: {str(e)}")
+            raise
 
     def embed_query(self, text: str) -> List[float]:
         try:
@@ -67,115 +65,139 @@ class QwenEmbeddings(Embeddings):
                 input=text,
                 timeout=15
             )
-            if resp.status_code == 200:
+            if resp and resp.status_code == 200:
                 return resp.output["embeddings"][0]["embedding"]
-            logger.error(f"查询向量化失败: {resp.code} - {resp.message}")
-            raise ValueError(f"API错误: {resp.message}")
+            msg = getattr(resp, 'message', '未知错误')
+            raise ValueError(f"Embedding失败: {msg}")
         except Exception as e:
-            logger.error(f"查询向量化异常: {str(e)}")
+            logger.error(f"Embedding查询错误: {str(e)}")
             raise
+
 
 # ==================== 2. LLM 模型封装 ====================
 class QwenChat(BaseChatModel):
-    """增强版的通义千问对话模型"""
+    """通义千问对话模型（兼容LangChain）"""
     model_name: str = "qwen-plus"
     temperature: float = 0.3
     api_key: str
-    max_retries: int = 3
 
-    def _generate(self, messages: List[HumanMessage | AIMessage], **kwargs) -> ChatResult:
-        for attempt in range(self.max_retries):
-            try:
-                qwen_messages = [
-                    {"role": "user" if isinstance(msg, HumanMessage) else "assistant", 
-                     "content": msg.content}
-                    for msg in messages
-                ]
-                
-                resp = dashscope.Generation.call(
-                    model=self.model_name,
-                    messages=qwen_messages,
-                    temperature=self.temperature,
-                    top_p=0.8,
-                    max_tokens=1024,
-                    timeout=30,
-                    **kwargs
-                )
+    def _generate(
+            self,
+            messages: List[HumanMessage | AIMessage],
+            stop: Optional[List[str]] = None,
+            run_manager: Optional[Any] = None,
+            **kwargs
+    ) -> ChatResult:
+        if not messages:
+            raise ValueError("消息列表不能为空")
+        if not self.api_key:
+            raise ValueError("API密钥未设置")
 
-                if resp.status_code != 200:
-                    raise ValueError(f"API错误: {resp.code} - {resp.message}")
+        dashscope.api_key = self.api_key
 
-                content = self._extract_content(resp.output)
-                return ChatResult(generations=[ChatGeneration(
-                    message=AIMessage(content=content),
-                    text=content
-                )])
+        # 转换消息
+        qwen_messages = []
+        for msg in messages:
+            if isinstance(msg, HumanMessage):
+                qwen_messages.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                qwen_messages.append({"role": "assistant", "content": msg.content})
 
-            except Exception as e:
-                if attempt == self.max_retries - 1:
-                    logger.error(f"API调用最终失败: {str(e)}\n{traceback.format_exc()}")
-                    raise
-                logger.warning(f"API调用失败，重试 {attempt + 1}/{self.max_retries}: {str(e)}")
-                continue
+        try:
+            resp = dashscope.Generation.call(
+                model=self.model_name,
+                messages=qwen_messages,
+                temperature=self.temperature,
+                top_p=0.8,
+                max_tokens=1024,
+                timeout=30,
+                **kwargs
+            )
 
-    def _extract_content(self, output: Dict) -> str:
-        """安全提取响应内容"""
-        if isinstance(output, dict):
-            if "text" in output:
-                return output["text"]
-            elif "choices" in output and output["choices"]:
-                return output["choices"][0]["message"]["content"]
-        raise ValueError("无法解析API响应内容")
+            if not resp:
+                raise ValueError("API返回空响应")
+            if resp.status_code != 200:
+                raise ValueError(f"API错误: {resp.code} - {resp.message}")
+            if not hasattr(resp, 'output') or not resp.output:
+                raise ValueError("API响应格式错误")
+
+            # 安全提取文本
+            output = resp.output
+            if isinstance(output, dict):
+                if "text" in output:
+                    content = output["text"]
+                elif "choices" in output and len(output["choices"]) > 0:
+                    content = output["choices"][0]["message"]["content"]
+                else:
+                    raise ValueError("无法提取回答内容")
+            else:
+                raise ValueError("output 格式错误")
+
+            generation = ChatGeneration(
+                message=AIMessage(content=content),
+                text=content
+            )
+
+            return ChatResult(generations=[generation])
+
+        except Exception as e:
+            logger.error(f"API调用异常: {str(e)}")
+            raise ValueError(f"生成失败: {str(e)}")
 
     @property
     def _llm_type(self) -> str:
         return "qwen-chat"
 
-# ==================== 3. 向量数据库优化 ====================
-def get_or_create_retriever(mcu_model: str, embeddings: Embeddings) -> Any:
-    """增强版的向量检索器获取"""
-    try:
-        pdf_path = PDF_DIR / f"{mcu_model}.pdf"
-        vectorstore_path = VECTORSTORE_DIR / mcu_model
-        
-        # 检查必要文件是否存在
-        required_files = ['index.faiss', 'index.pkl']
-        if all((vectorstore_path / f).exists() for f in required_files):
-            try:
-                return FAISS.load_local(
-                    str(vectorstore_path),
-                    embeddings,
-                    allow_dangerous_deserialization=True
-                ).as_retriever(search_kwargs={"k": 3})
-            except Exception as e:
-                logger.error(f"向量库加载失败，将重建: {str(e)}")
-                # 清理损坏的文件
-                for f in required_files:
-                    (vectorstore_path / f).unlink(missing_ok=True)
-        
-        # 重建向量库
-        if not pdf_path.exists():
-            raise FileNotFoundError(f"PDF文件不存在: {pdf_path}")
 
-        logger.info(f"构建新的向量数据库: {pdf_path}")
-        loader = PyPDFLoader(str(pdf_path))
-        docs = loader.load_and_split(
-            text_splitter=RecursiveCharacterTextSplitter(
-                chunk_size=500,
-                chunk_overlap=100,
-                separators=["\n\n", "\n", "。", "！", "？", ";", ".", " "]
-            )
+# ==================== 3. 缓存向量数据库 ====================
+def get_or_create_retriever(
+    mcu_model: str,
+    embeddings: Embeddings,
+    pdf_dir: str = PDF_DIR  # 使用全局PDF_DIR
+) -> Any:
+    """
+    获取或创建向量检索器（带本地缓存）
+    """
+    pdf_path = os.path.join(pdf_dir, f"{mcu_model}.pdf")
+    vectorstore_path = os.path.join(VECTORSTORE_DIR, mcu_model)
+
+    # 检查是否已缓存向量库
+    if os.path.exists(vectorstore_path):
+        logger.info(f"正在加载缓存的向量数据库: {vectorstore_path}")
+        db = FAISS.load_local(
+            vectorstore_path,
+            embeddings,
+            allow_dangerous_deserialization=True  # 注意安全
         )
-
-        db = FAISS.from_documents(docs, embeddings)
-        db.save_local(str(vectorstore_path))
         return db.as_retriever(search_kwargs={"k": 3})
 
-    except Exception as e:
-        logger.error(f"向量检索器创建失败: {str(e)}\n{traceback.format_exc()}")
-        raise ValueError(f"无法创建检索器: {str(e)}")
+    # 首次处理：加载、切分、向量化、保存
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"找不到资料文件: {pdf_path}")
 
-# ==================== 4. 问答代理优化 ====================
+    logger.info(f"首次处理文档，正在构建向量数据库: {pdf_path}")
+    loader = PyPDFLoader(pdf_path)
+    docs = loader.load()
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=100,
+        separators=["\n\n", "\n", "。", "！", "？", "；", ".", ";", " ", ""]
+    )
+    texts = text_splitter.split_documents(docs)
+
+    # 构建并向量化
+    db = FAISS.from_documents(texts, embeddings)
+
+    # 保存到本地
+    os.makedirs(VECTORSTORE_DIR, exist_ok=True)
+    db.save_local(vectorstore_path)
+    logger.info(f"向量数据库已保存至: {vectorstore_path}")
+
+    return db.as_retriever(search_kwargs={"k": 3})
+
+
+# ==================== 4. 问答代理 ====================
 def qa_agent(
     question: str,
     memory: ConversationBufferMemory,
@@ -183,57 +205,61 @@ def qa_agent(
     llm: BaseChatModel,
     embeddings: Embeddings
 ) -> Dict[str, Any]:
-    """增强版的问答代理"""
+    """问答代理（使用缓存向量库）"""
     try:
-        question = question.strip()
-        if not question:
-            return {"answer": "问题不能为空"}
+        if not question.strip():
+            raise ValueError("问题不能为空")
 
-        # 获取检索器
+        # 使用缓存的检索器
         retriever = get_or_create_retriever(mcu_model, embeddings)
 
-        # 构建问答链
+        # 自定义 Prompt
         prompt = ChatPromptTemplate.from_template("""
-你是一个专业的单片机技术助手，请根据以下上下文回答问题。
+你是一个单片机技术文档助手，请严格根据以下检索到的上下文回答问题。
+回答要简洁、准确，使用中文。
+
+如果上下文中有明确答案，你先回答出得到的答案，再讲上下文中有关这个部分的全部内容，最好结合相关代码，最后扩展与上下文无关的内容,与上下文无关的内容可以使用比喻等方法让文字更加活泼易懂，其他部分保持严谨。
+
+如果上下文中没有明确答案，请先回答“我没有找到相关信息”，在补充从网上寻找到的的内容,这时候可以说的详细一点,与上下文无关的内容可以使用比喻等方法让文字更加活泼易懂。
+
+请不要编造或推测不存在的东西。
+
 上下文:
 {context}
 
 历史对话:
 {chat_history}
 
-当前问题: {input}
-
-回答要求:
-1. 如果上下文有明确答案，先直接回答
-2. 然后解释相关原理
-3. 最后提供示例代码(如果有)
-4. 保持专业但易懂的风格
-5. 如果不知道，明确说明并给出建议
+当前问题:
+{input}
 """)
-        
-        document_chain = create_stuff_documents_chain(llm, prompt)
-        retrieval_chain = create_retrieval_chain(retriever, document_chain)
+
+        # 创建文档链和检索链
+        document_chain = create_stuff_documents_chain(llm=llm, prompt=prompt)
+        retrieval_chain = create_retrieval_chain(retriever=retriever, combine_docs_chain=document_chain)
+
+        # 提取历史对话
+        chat_history = ""
+        if memory.chat_memory.messages:
+            chat_history = get_buffer_string(memory.chat_memory.messages)
 
         # 执行查询
         result = retrieval_chain.invoke({
             "input": question,
-            "chat_history": get_buffer_string(memory.chat_memory.messages)
+            "chat_history": chat_history
         })
 
-        # 保存对话
+        if "answer" not in result:
+            raise ValueError("无效的响应格式")
+
+        # 保存到记忆
         memory.save_context(
             {"input": question},
-            {"answer": result.get("answer", "未获得有效回答")}
+            {"answer": result["answer"]}
         )
 
-        return {"answer": result.get("answer", "抱歉，我无法回答这个问题")}
+        return {"answer": result["answer"]}
 
-    except FileNotFoundError as e:
-        logger.error(f"文件缺失错误: {str(e)}")
-        return {
-            "answer": "系统资源未正确初始化",
-            "debug": f"请确认已上传{PDF_DIR}/{mcu_model}.pdf文件"
-        }
     except Exception as e:
-        logger.error(f"系统错误: {traceback.format_exc()}")
-        return {"answer": "系统处理问题时出错，请稍后再试"}
+        logger.error(f"问答流程错误: {str(e)}")
+        return {"answer": "抱歉，我在处理问题时遇到了错误。"}
