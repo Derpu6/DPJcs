@@ -18,6 +18,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取当前文件绝对路径
+VECTORSTORE_DIR = os.path.join(BASE_DIR, "vectorstores")  # 向量库存储路径
+PDF_DIR = os.path.join(BASE_DIR, "data")
 
 # ==================== 1. Embedding 模型封装 ====================
 
@@ -260,4 +263,5 @@ def qa_agent(
 
     except Exception as e:
         logger.error(f"问答流程错误: {str(e)}")
+
         return {"answer": "抱歉，我在处理问题时遇到了错误。"}
