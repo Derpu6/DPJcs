@@ -73,7 +73,6 @@ class QwenEmbeddings(Embeddings):
             logger.error(f"Embedding查询错误: {str(e)}")
             raise
 
-
 # ==================== 2. LLM 模型封装 ====================
 class QwenChat(BaseChatModel):
     """通义千问对话模型（兼容LangChain）"""
@@ -148,7 +147,6 @@ class QwenChat(BaseChatModel):
     def _llm_type(self) -> str:
         return "qwen-chat"
 
-
 # ==================== 3. 缓存向量数据库 ====================
 def get_or_create_retriever(
     mcu_model: str,
@@ -195,7 +193,6 @@ def get_or_create_retriever(
     logger.info(f"向量数据库已保存至: {vectorstore_path}")
 
     return db.as_retriever(search_kwargs={"k": 3})
-
 
 # ==================== 4. 问答代理 ====================
 def qa_agent(
