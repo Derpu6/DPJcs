@@ -220,16 +220,6 @@ class ExcelTracker:
 
                 st.title("📊 学情统计看板")
 
-                if st.session_state.get('is_admin', False):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("🔄 刷新数据", use_container_width=True):
-                            st.rerun()
-                    with col2:
-                        if st.button("🗑️ 清空所有数据", type="primary", use_container_width=True):
-                            self.clear_all_data()
-                            st.rerun()
-
                 tab1, tab2 = st.tabs(["统计摘要", "详细记录"])
 
                 with tab1:
@@ -280,18 +270,6 @@ class ExcelTracker:
 
         except Exception as e:
             st.error(f"加载数据失败: {str(e)}")
-
-    def clear_all_data(self):
-        """清空所有数据"""
-        with self._lock:
-            try:
-                self._create_new_excel_file()
-                st.success("所有数据已清空！")
-                logger.info("数据清空操作完成")
-            except Exception as e:
-                st.error(f"清空失败: {str(e)}")
-                logger.error(f"清空数据错误: {str(e)}", exc_info=True)
-
 
 # 全局统计实例
 tracker = ExcelTracker()
@@ -385,21 +363,6 @@ def init_embeddings(api_key: str) -> QwenEmbeddings:
 def show_config_panel():
     """配置面板组件"""
     with st.expander("🔧 配置选项", expanded=False):
-        col1, col2 = st.columns([3, 2])
-        with col1:
-            qwen_api_key = st.text_input(
-                "通义千问API密钥",
-                type="password",
-                placeholder="输入API密钥",
-                key="api_key"
-            )
-        with col2:
-            student_id = st.text_input(
-                "学号",
-                placeholder="请输入学号",
-                key="student_id"
-            )
-
         # 单片机型号选择
         st.markdown("选择单片机型号:")
         mcu_col1, mcu_col2 = st.columns(2)
@@ -445,26 +408,47 @@ def show_config_panel():
 
 def show_admin_panel():
     """管理员控制面板"""
-    with st.sidebar:
-        if not st.session_state.app_state['is_admin']:
-            password = st.text_input("管理员密码", type="password", key="admin_pw")
+    # 在侧边栏最下方添加管理员登录按钮
+    st.markdown("---")  # 添加分隔线
+
+    # 非管理员状态显示登录按钮
+    if not st.session_state.app_state['is_admin']:
+        # 使用空列将按钮推到最下方
+        for _ in range(60):  # 添加多个空行
+            st.write("")
+
+        # 添加管理员登录按钮
+        if st.button("🔑 管理员登录", use_container_width=True):
+            # 设置状态显示密码输入框
+            st.session_state.show_admin_password = True
+
+    # 如果用户点击了管理员登录按钮，显示密码输入框
+    if st.session_state.get('show_admin_password', False):
+        password = st.text_input("请输入管理员密码", type="password", key="admin_pw")
+
+        if password:
             if password == "qwert":
                 AppState.update(is_admin=True, show_stats=True)
+                # 重置状态
+                st.session_state.show_admin_password = False
                 st.rerun()
-            elif password:
+            else:
                 st.error("密码错误")
-        else:
-            st.success("管理员模式")
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("📊 统计面板"):
-                    AppState.update(show_stats=True)
-            with col2:
-                if st.button("❓ 问答界面"):
-                    AppState.update(show_stats=False)
-            if st.button("🚪 退出管理", type="primary"):
-                AppState.update(is_admin=False, show_stats=False)
-            st.metric("响应延迟", f"{(time.time() - st.session_state.app_state['switch_time']):.3f}s")
+
+    # 管理员状态处理
+    if st.session_state.app_state['is_admin']:
+        st.success("管理员模式")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📊 统计面板"):
+                AppState.update(show_stats=True)
+        with col2:
+            if st.button("❓ 问答界面"):
+                AppState.update(show_stats=False)
+        if st.button("🚪 退出管理", type="primary"):
+            AppState.update(is_admin=False, show_stats=False)
+            st.rerun()
+        st.metric("响应延迟", f"{(time.time() - st.session_state.app_state['switch_time']):.3f}s")
 
 
 # ==================== 主界面路由 ====================
@@ -478,7 +462,6 @@ def show_stats_interface():
 
 def show_qa_interface():
     """主问答界面"""
-    st.title("🖥️ 单片机智能问答")
 
     student_id = st.session_state.get('student_id', '')
     if student_id:
@@ -529,12 +512,49 @@ def show_qa_interface():
 
 # ==================== 应用主入口 ====================
 def main():
-    show_config_panel()
-    show_admin_panel()
+    # 在侧边栏组织所有用户配置选项
+    with st.sidebar:
+        st.header("配置选项")
 
-    if st.session_state.app_state['show_stats']:
+        # API密钥和学号输入
+        st.session_state['api_key'] = st.text_input(
+            "通义千问API密钥",
+            type="password",
+            placeholder="输入API密钥",
+            key="api_key_input"
+        )
+        st.session_state['student_id'] = st.text_input(
+            "学号",
+            placeholder="请输入学号",
+            key="student_id_input"
+        )
+
+        # 侧边栏重置对话按钮
+        if st.button("🔄 重置对话", key="reset_sidebar"):
+            AppState.update(
+                memory=ConversationBufferMemory(
+                    return_messages=True,
+                    memory_key="chat_history",
+                    output_key="answer"
+                ),
+                messages=[]
+            )
+            st.session_state.app_state['memory'].chat_memory.add_message(
+                AIMessage(content="对话已重置，请重新提问。")
+            )
+            st.rerun()
+
+        # 在侧边栏显示管理员面板
+        show_admin_panel()
+        st.markdown("---")  # 分隔线
+
+    # 根据状态显示不同界面
+    if st.session_state.app_state['is_admin'] and st.session_state.app_state['show_stats']:
         show_stats_interface()
     else:
+        # 在主内容区显示配置面板（放在标题下方）
+        st.title("🖥️ 单片机智能问答工具")
+        show_config_panel()  # 将配置面板放在标题下方
         show_qa_interface()
 
 
