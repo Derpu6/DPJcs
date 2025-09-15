@@ -18,16 +18,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==================== 路径配置 ====================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # 获取当前文件绝对路径
-VECTORSTORE_DIR = os.path.join(BASE_DIR, "vectorstores")  # 向量库存储路径
-PDF_DIR = os.path.join(BASE_DIR, "data")  # PDF文档存储路径
-
-# 确保目录存在
-os.makedirs(VECTORSTORE_DIR, exist_ok=True)
-os.makedirs(PDF_DIR, exist_ok=True)
 
 # ==================== 1. Embedding 模型封装 ====================
+
 class QwenEmbeddings(Embeddings):
     """通义千问文本向量化"""
 
@@ -73,7 +66,9 @@ class QwenEmbeddings(Embeddings):
             logger.error(f"Embedding查询错误: {str(e)}")
             raise
 
+
 # ==================== 2. LLM 模型封装 ====================
+
 class QwenChat(BaseChatModel):
     """通义千问对话模型（兼容LangChain）"""
     model_name: str = "qwen-plus"
@@ -147,11 +142,15 @@ class QwenChat(BaseChatModel):
     def _llm_type(self) -> str:
         return "qwen-chat"
 
-# ==================== 3. 缓存向量数据库 ====================
+
+# ==================== 3. 缓存向量数据库（关键优化）====================
+
+VECTORSTORE_DIR = "./vectorstores"  # 向量库缓存路径
+
 def get_or_create_retriever(
     mcu_model: str,
     embeddings: Embeddings,
-    pdf_dir: str = PDF_DIR  # 使用全局PDF_DIR
+    pdf_dir: str = "./data"
 ) -> Any:
     """
     获取或创建向量检索器（带本地缓存）
@@ -194,7 +193,9 @@ def get_or_create_retriever(
 
     return db.as_retriever(search_kwargs={"k": 3})
 
-# ==================== 4. 问答代理 ====================
+
+# ==================== 4. 问答代理（优化版）=====================
+
 def qa_agent(
     question: str,
     memory: ConversationBufferMemory,
@@ -207,10 +208,10 @@ def qa_agent(
         if not question.strip():
             raise ValueError("问题不能为空")
 
-        # 使用缓存的检索器
+        # ✅ 使用缓存的检索器（不再每次都切片）
         retriever = get_or_create_retriever(mcu_model, embeddings)
 
-        # 自定义 Prompt
+        # ✅ 自定义 Prompt
         prompt = ChatPromptTemplate.from_template("""
 你是一个单片机技术文档助手，请严格根据以下检索到的上下文回答问题。
 回答要简洁、准确，使用中文。
